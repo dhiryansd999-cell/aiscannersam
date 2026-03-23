@@ -24,7 +24,13 @@
             background-color: var(--apple-bg); 
             color: var(--apple-text); 
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            overscroll-behavior-y: contain;
+            /* Mobile Scroll Glitch Fixes */
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100dvh;
+            overflow: hidden;
+            overscroll-behavior-y: none;
             -webkit-font-smoothing: antialiased;
         }
         
@@ -69,10 +75,25 @@
         .thumb-strip::-webkit-scrollbar { display: none; }
     </style>
 </head>
-<body class="flex flex-col h-screen">
+<!-- Replaced h-screen with absolute inset-0 to prevent Android scroll stretching -->
+<body class="flex flex-col absolute inset-0 overflow-hidden">
+
+    <!-- START VIEW -->
+    <section id="view-start" class="flex-1 flex flex-col items-center justify-center bg-[#F5F5F7] h-full w-full absolute inset-0 z-50 p-8">
+        <div class="w-24 h-24 bg-white rounded-3xl shadow-xl flex items-center justify-center mb-8 border border-gray-100">
+            <i class="ph-fill ph-scan text-5xl text-[#0071E3]"></i>
+        </div>
+        <h1 class="text-4xl font-bold tracking-tight text-[#1D1D1F] mb-3">ProScanner</h1>
+        <p class="text-gray-500 text-center font-medium mb-12 max-w-xs">
+            Intelligent document scanning with auto-cropping and AI naming.
+        </p>
+        <button id="startScanBtn" class="w-full max-w-xs py-4 rounded-full bg-[#0071E3] text-white font-bold text-lg flex items-center justify-center gap-2 active:scale-95 transition-transform shadow-lg shadow-blue-500/30">
+            <i class="ph-bold ph-camera"></i> Start Scan
+        </button>
+    </section>
 
     <!-- CAMERA VIEW -->
-    <section id="view-camera" class="flex-1 flex flex-col h-full bg-black relative">
+    <section id="view-camera" class="flex-1 flex flex-col h-full bg-black relative hide">
         <!-- Top UI -->
         <div class="absolute top-0 w-full p-4 z-20 flex justify-between items-center">
             <div id="topCounter" class="glass-dark px-4 py-1.5 rounded-full text-white text-sm font-semibold hide shadow-lg border border-white/10">
@@ -230,6 +251,7 @@
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         
         const views = {
+            start: document.getElementById('view-start'),
             camera: document.getElementById('view-camera'),
             crop: document.getElementById('view-crop'),
             preview: document.getElementById('view-preview'),
@@ -237,6 +259,7 @@
         };
         
         const btns = {
+            startScan: document.getElementById('startScanBtn'),
             capture: document.getElementById('captureBtn'),
             retake: document.getElementById('retakeFromCropBtn'),
             confirm: document.getElementById('confirmCropBtn'),
@@ -278,6 +301,7 @@
         let currentPageIndex = -1;
         let isFlashOn = false;
         let tesseractWorker = null;
+        let docCounter = 1;
 
         function switchView(viewName) {
             Object.values(views).forEach(v => v.classList.add('hide'));
@@ -583,12 +607,16 @@
                 
                 const lines = text.split('\n').map(l => l.trim().replace(/[^a-zA-Z0-9 ]/g, '')).filter(l => l.length > 4 && /[a-zA-Z]/.test(l));
                 if (lines.length > 0) {
-                    let bestLine = lines[0];
-                    if (lines.length > 1 && lines[1].length > bestLine.length + 5) bestLine = lines[1];
-
-                    let title = bestLine.split(' ').slice(0, 3).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('_');
-                    title = title.substring(0, 20);
-                    els.docName.value = `${title}`;
+                    // Grab the most significant words across the first couple of lines for a strong subject
+                    let rawText = lines.slice(0, 2).join(' ');
+                    let bestWords = rawText.split(/\s+/).filter(w => w.length > 2 && /[a-zA-Z]/.test(w)).slice(0, 3);
+                    
+                    let subject = bestWords.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('_');
+                    if (!subject) subject = "Document";
+                    
+                    // Format: {Subject}_{Counter} (e.g., Invoice_Total_1, Healthcare_Notes_2)
+                    els.docName.value = `${subject}_${docCounter}`;
+                    docCounter++; // Increment for the next scanned document
                 }
             } catch (e) {}
             finally { els.aiNaming.classList.add('hide'); }
@@ -724,14 +752,20 @@
         });
 
         btns.closeForm.addEventListener('click', () => {
-            switchView('camera'); startCamera();
+            switchView('start'); 
             pages = [];
+            docCounter = 1; // Reset counter for new session
+        });
+
+        btns.startScan.addEventListener('click', () => {
+            switchView('camera');
+            startCamera();
         });
 
         // Initialize App
         window.addEventListener('load', () => {
             initAI(); 
-            startCamera();
+            // Camera will ONLY start when 'Start Scan' button is clicked now!
         });
 
     </script>
