@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ProScanner</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- jsPDF for PDF generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- Tesseract.js for AI Auto-Rename (OCR) - Lightweight -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <!-- Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <style>
+        /* Apple Style Core */
+        :root {
+            --apple-bg: #F5F5F7;
+            --apple-card: #FFFFFF;
+            --apple-text: #1D1D1F;
+            --apple-blue: #0071E3;
+        }
+        body { 
+            background-color: var(--apple-bg); 
+            color: var(--apple-text); 
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overscroll-behavior-y: contain;
+            -webkit-font-smoothing: antialiased;
+        }
+        
+        /* Camera & Overlays */
+        .camera-container { position: relative; width: 100%; height: 100%; background: #000; overflow: hidden; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.75);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-top: 1px solid rgba(255,255,255,0.5);
+        }
+        .glass-dark {
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+        }
+
+        /* 4-Point Polygon Crop UI */
+        .crop-wrapper { position: relative; width: 100%; max-height: 65vh; display: flex; justify-content: center; align-items: center; background: #000; }
+        #cropCanvas { max-width: 100%; max-height: 100%; object-fit: contain; }
+        #polygonOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        .poly-handle { pointer-events: auto; cursor: grab; fill: #FFFFFF; stroke: #0071E3; stroke-width: 3; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); transition: r 0.1s; }
+        .poly-handle:active { r: 16; cursor: grabbing; }
+
+        /* Zoom Slider */
+        input[type=range] {
+            -webkit-appearance: none; background: transparent; width: 150px;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none; height: 24px; width: 24px; border-radius: 50%;
+            background: #ffffff; box-shadow: 0 2px 6px rgba(0,0,0,0.3); cursor: pointer; margin-top: -10px;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%; height: 4px; cursor: pointer; background: rgba(255,255,255,0.4); border-radius: 2px;
+        }
+
+        /* Utility */
+        .hide { display: none !important; }
+        .active-filter { background: #000 !important; color: #fff !important; border-color: #000 !important; }
+        .thumb-strip::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="flex flex-col h-screen">
+
+    <!-- CAMERA VIEW -->
+    <section id="view-camera" class="flex-1 flex flex-col h-full bg-black relative">
+        <!-- Top UI -->
+        <div class="absolute top-0 w-full p-4 z-20 flex justify-between items-center">
+            <div id="topCounter" class="glass-dark px-4 py-1.5 rounded-full text-white text-sm font-semibold hide shadow-lg border border-white/10">
+                0 Pages
+            </div>
+            <button id="flashBtn" class="glass-dark w-10 h-10 rounded-full flex items-center justify-center text-white hide active:scale-95 transition-transform">
+                <i class="ph-fill ph-flashlight text-xl"></i>
+            </button>
+        </div>
+
+        <div class="camera-container">
+            <video id="videoElement" autoplay playsinline></video>
+            
+            <!-- Zoom Control -->
+            <div id="zoomContainer" class="absolute bottom-6 w-full flex justify-center items-center gap-3 z-20 hide">
+                <i class="ph-bold ph-minus text-white drop-shadow-md"></i>
+                <input type="range" id="zoomSlider" min="1" max="3" step="0.1" value="1">
+                <i class="ph-bold ph-plus text-white drop-shadow-md"></i>
+            </div>
+
+            <!-- Initializing Overlay -->
+            <div id="loading-cam" class="absolute inset-0 flex items-center justify-center bg-black z-30">
+                <i class="ph-bold ph-spinner-gap animate-spin text-white text-4xl"></i>
+            </div>
+        </div>
+        
+        <!-- Bottom Controls -->
+        <div class="h-40 bg-black pb-8 pt-4 flex flex-col items-center justify-center shrink-0 z-20">
+            <p id="cameraHelperText" class="text-white/70 text-sm font-medium mb-4">Position document in view</p>
+            <div class="flex items-center justify-center gap-10 w-full px-8">
+                <button id="quickFinishBtn" class="w-14 h-14 rounded-full bg-white/10 flex items-center justify-center text-white opacity-0 pointer-events-none transition-opacity">
+                    <i class="ph-bold ph-check text-2xl"></i>
+                </button>
+                
+                <button id="captureBtn" class="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center active:scale-90 transition-transform">
+                    <div class="w-16 h-16 rounded-full bg-white"></div>
+                </button>
+                
+                <div class="w-14 h-14"></div> <!-- Spacer -->
+            </div>
+        </div>
+    </section>
+
+    <!-- CROP VIEW (4-POINT POLYGON) -->
+    <section id="view-crop" class="flex-1 flex flex-col hide bg-black h-full overflow-hidden">
+        <div class="absolute top-4 w-full text-center z-20">
+            <span class="glass-dark px-4 py-1.5 rounded-full text-white text-sm font-medium shadow-lg border border-white/10">
+                Adjust Corners
+            </span>
+        </div>
+
+        <div class="flex-1 p-4 flex items-center justify-center relative">
+            <div class="crop-wrapper" id="cropContainer">
+                <canvas id="cropCanvas"></canvas>
+                <!-- SVG for 4-point draggable handles -->
+                <svg id="polygonOverlay">
+                    <polygon id="cropPoly" points="" fill="rgba(0, 113, 227, 0.15)" stroke="#0071E3" stroke-width="2" stroke-dasharray="4" />
+                    <circle class="poly-handle" id="pt-tl" r="12" />
+                    <circle class="poly-handle" id="pt-tr" r="12" />
+                    <circle class="poly-handle" id="pt-br" r="12" />
+                    <circle class="poly-handle" id="pt-bl" r="12" />
+                </svg>
+            </div>
+        </div>
+        
+        <div class="h-28 bg-black p-6 flex gap-4 shrink-0 z-20">
+            <button id="retakeFromCropBtn" class="flex-1 rounded-2xl bg-white/10 text-white font-semibold active:bg-white/20 transition-colors">
+                Retake
+            </button>
+            <button id="confirmCropBtn" class="flex-1 rounded-2xl bg-white text-black font-bold active:bg-gray-200 transition-colors flex items-center justify-center gap-2">
+                Keep Scan <i class="ph-bold ph-arrow-right"></i>
+            </button>
+        </div>
+    </section>
+
+    <!-- PREVIEW & FILTER VIEW -->
+    <section id="view-preview" class="flex-1 flex flex-col hide h-full overflow-hidden">
+        <!-- Header -->
+        <header class="p-4 flex items-center justify-between bg-white border-b border-gray-200 shrink-0 z-10 shadow-sm">
+            <h1 class="text-xl font-bold tracking-tight">Scanner</h1>
+            <div id="aiNamingOverlay" class="flex items-center gap-1 text-xs font-semibold text-blue-600 bg-blue-50 px-2 py-1 rounded-full hide">
+                <i class="ph-fill ph-sparkle animate-pulse"></i> Auto-naming
+            </div>
+        </header>
+
+        <!-- Main Image Focus -->
+        <div class="flex-1 p-6 flex items-center justify-center overflow-hidden relative min-h-0 bg-[#F5F5F7]">
+            <canvas id="canvasElement" class="shadow-xl shadow-black/10 border border-gray-200"></canvas>
+        </div>
+        
+        <!-- Thumbnails -->
+        <div class="w-full bg-white px-6 py-3 overflow-x-auto whitespace-nowrap border-t border-gray-200 flex gap-4 thumb-strip shrink-0" id="thumbnailStrip"></div>
+        
+        <!-- Editor Controls (Apple Glass Style) -->
+        <div class="glass-panel p-6 shrink-0 pb-8 rounded-t-3xl z-20">
+            <div class="mb-5 relative">
+                <div class="flex items-center bg-gray-100 rounded-xl px-4 py-3 border border-transparent focus-within:border-black focus-within:bg-white transition-all">
+                    <input type="text" id="docNameInput" class="bg-transparent border-none text-black font-semibold w-full focus:outline-none focus:ring-0 placeholder-gray-400" placeholder="Scanned Document">
+                    <span class="text-gray-400 font-medium ml-2">.pdf</span>
+                </div>
+            </div>
+
+            <div class="flex justify-between gap-3 mb-6">
+                <button class="filter-btn active-filter flex-1 py-2.5 rounded-xl border border-gray-300 text-[12px] font-semibold transition-colors flex flex-col items-center bg-white text-gray-700" data-filter="magic">
+                    <i class="ph-fill ph-magic-wand text-lg mb-1"></i> Magic
+                </button>
+                <button class="filter-btn flex-1 py-2.5 rounded-xl border border-gray-300 text-[12px] font-semibold transition-colors flex flex-col items-center bg-white text-gray-700" data-filter="bw">
+                    <i class="ph-bold ph-text-t text-lg mb-1"></i> B&W
+                </button>
+                <button class="filter-btn flex-1 py-2.5 rounded-xl border border-gray-300 text-[12px] font-semibold transition-colors flex flex-col items-center bg-white text-gray-700" data-filter="gray">
+                    <i class="ph-fill ph-drop text-lg mb-1"></i> Gray
+                </button>
+                <button class="filter-btn flex-1 py-2.5 rounded-xl border border-gray-300 text-[12px] font-semibold transition-colors flex flex-col items-center bg-white text-gray-700" data-filter="original">
+                    <i class="ph-fill ph-image text-lg mb-1"></i> Photo
+                </button>
+            </div>
+            
+            <button id="savePdfBtn" class="w-full py-4 rounded-full bg-black text-white font-bold text-lg active:scale-[0.98] transition-transform flex items-center justify-center gap-2 shadow-md">
+                Save & Upload
+            </button>
+        </div>
+    </section>
+
+    <!-- SUCCESS / GOOGLE FORM VIEW -->
+    <section id="view-success" class="flex-1 flex flex-col items-center justify-center hide bg-white h-full w-full absolute inset-0 z-50 p-8">
+        <div class="w-20 h-20 bg-black rounded-full flex items-center justify-center mb-6 shadow-xl shadow-black/20">
+            <i class="ph-bold ph-check text-4xl text-white"></i>
+        </div>
+        
+        <h2 class="text-3xl font-bold mb-2 tracking-tight">Ready to Upload</h2>
+        <p class="text-gray-500 mb-8 text-center font-medium max-w-xs">
+            Saved to device as:<br>
+            <strong id="formFileNameDisplay" class="text-black block mt-2 text-lg"></strong>
+        </p>
+
+        <div class="w-full max-w-xs space-y-4">
+            <button id="openFormBtn" class="w-full py-4 rounded-full bg-[#0071E3] text-white font-bold text-lg flex items-center justify-center gap-2 active:scale-95 transition-transform shadow-lg shadow-blue-500/30">
+                Open Google Form
+            </button>
+            
+            <p class="text-xs text-center text-gray-400 font-medium px-4 mt-2">
+                Tap "Add file" in the form to attach your new PDF.
+            </p>
+
+            <button id="closeFormBtn" class="w-full py-3 mt-4 text-black font-semibold bg-gray-100 rounded-full active:bg-gray-200 transition-colors">
+                Done
+            </button>
+        </div>
+    </section>
+
+    <script>
+        // DOM Elements
+        const video = document.getElementById('videoElement');
+        const canvas = document.getElementById('canvasElement');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        
+        const views = {
+            camera: document.getElementById('view-camera'),
+            crop: document.getElementById('view-crop'),
+            preview: document.getElementById('view-preview'),
+            success: document.getElementById('view-success')
+        };
+        
+        const btns = {
+            capture: document.getElementById('captureBtn'),
+            retake: document.getElementById('retakeFromCropBtn'),
+            confirm: document.getElementById('confirmCropBtn'),
+            quickFinish: document.getElementById('quickFinishBtn'),
+            savePdf: document.getElementById('savePdfBtn'),
+            openForm: document.getElementById('openFormBtn'),
+            closeForm: document.getElementById('closeFormBtn'),
+            flash: document.getElementById('flashBtn'),
+            filters: document.querySelectorAll('.filter-btn')
+        };
+
+        const els = {
+            docName: document.getElementById('docNameInput'),
+            topCounter: document.getElementById('topCounter'),
+            thumbnails: document.getElementById('thumbnailStrip'),
+            aiNaming: document.getElementById('aiNamingOverlay'),
+            camHelper: document.getElementById('cameraHelperText'),
+            zoomSlider: document.getElementById('zoomSlider'),
+            zoomContainer: document.getElementById('zoomContainer')
+        };
+
+        // Crop Elements
+        const cropCanvas = document.getElementById('cropCanvas');
+        const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
+        const svgPoly = document.getElementById('cropPoly');
+        const handles = {
+            tl: document.getElementById('pt-tl'),
+            tr: document.getElementById('pt-tr'),
+            br: document.getElementById('pt-br'),
+            bl: document.getElementById('pt-bl')
+        };
+        let polyPts = { tl: {x:0, y:0}, tr: {x:0, y:0}, br: {x:0, y:0}, bl: {x:0, y:0} };
+
+        // State
+        let uncroppedCanvas = document.createElement('canvas');
+        let stream = null;
+        let videoTrack = null;
+        let pages = []; 
+        let currentPageIndex = -1;
+        let isFlashOn = false;
+        let tesseractWorker = null;
+
+        function switchView(viewName) {
+            Object.values(views).forEach(v => v.classList.add('hide'));
+            views[viewName].classList.remove('hide');
+        }
+
+        // --- BACKGROUND AI WORKERS ---
+        async function initAI() {
+            try {
+                // Initialize minimal English Tesseract for fast OCR
+                tesseractWorker = await Tesseract.createWorker('eng', 1, { logger: () => {} });
+            } catch (e) { console.warn("OCR Init failed", e); }
+        }
+
+        // --- CAMERA & ZOOM ---
+        async function startCamera() {
+            try {
+                document.getElementById('loading-cam').classList.remove('hide');
+                if (stream) stream.getTracks().forEach(track => track.stop());
+                
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment', width: { ideal: 2560 }, height: { ideal: 1440 }, advanced: [{focusMode: "continuous"}] } 
+                });
+                video.srcObject = stream;
+                videoTrack = stream.getVideoTracks()[0];
+                
+                // Hardware Capabilities Setup
+                setTimeout(() => {
+                    try {
+                        const caps = videoTrack.getCapabilities();
+                        if (caps.torch) btns.flash.classList.remove('hide');
+                        if (caps.zoom) {
+                            els.zoomContainer.classList.remove('hide');
+                            els.zoomSlider.min = caps.zoom.min || 1;
+                            els.zoomSlider.max = Math.min(caps.zoom.max || 3, 4); // Limit max zoom to maintain quality
+                            els.zoomSlider.step = (caps.zoom.step || 0.1);
+                            els.zoomSlider.value = caps.zoom.min || 1;
+                            
+                            // Auto slight zoom in for better macro focus on documents
+                            let optimalZoom = Math.min(caps.zoom.max, (caps.zoom.min || 1) + 0.5);
+                            els.zoomSlider.value = optimalZoom;
+                            videoTrack.applyConstraints({ advanced: [{ zoom: optimalZoom }] });
+                        }
+                    } catch(e) {}
+                }, 500);
+
+                video.onloadedmetadata = () => {
+                    document.getElementById('loading-cam').classList.add('hide');
+                    video.play();
+                };
+
+                // Continuous Scan UI
+                if (pages.length > 0) {
+                    btns.quickFinish.classList.remove('opacity-0', 'pointer-events-none');
+                    els.topCounter.innerText = `${pages.length} Scan${pages.length > 1 ? 's' : ''}`;
+                    els.topCounter.classList.remove('hide');
+                    els.camHelper.innerText = "Scan next page or click checkmark";
+                    btns.quickFinish.onclick = () => { switchView('preview'); renderPreview(); };
+                } else {
+                    btns.quickFinish.classList.add('opacity-0', 'pointer-events-none');
+                    els.topCounter.classList.add('hide');
+                    els.camHelper.innerText = "Position document in view";
+                }
+            } catch (err) { alert("Camera access required for scanning."); }
+        }
+
+        function stopCamera() {
+            if (videoTrack) {
+                if (isFlashOn) videoTrack.applyConstraints({ advanced: [{ torch: false }] }).catch(()=>{});
+                videoTrack.stop();
+            }
+            isFlashOn = false;
+            btns.flash.classList.remove('bg-white', 'text-black');
+            btns.flash.classList.add('glass-dark', 'text-white');
+        }
+
+        els.zoomSlider.addEventListener('input', (e) => {
+            if (videoTrack) videoTrack.applyConstraints({ advanced: [{ zoom: parseFloat(e.target.value) }] });
+        });
+
+        btns.flash.addEventListener('click', async () => {
+            if (!videoTrack) return;
+            try {
+                isFlashOn = !isFlashOn;
+                await videoTrack.applyConstraints({ advanced: [{ torch: isFlashOn }] });
+                if (isFlashOn) {
+                    btns.flash.classList.add('bg-white', 'text-black');
+                    btns.flash.classList.remove('glass-dark', 'text-white');
+                } else {
+                    btns.flash.classList.remove('bg-white', 'text-black');
+                    btns.flash.classList.add('glass-dark', 'text-white');
+                }
+            } catch (err) {}
+        });
+
+        // --- 4-POINT EDGE DETECTION HEURISTIC ---
+        function fastQuadDetection(srcCanvas) {
+            // Downscale for speed
+            const size = 150;
+            const thumb = document.createElement('canvas');
+            thumb.width = size; thumb.height = size;
+            const tCtx = thumb.getContext('2d', { willReadFrequently: true });
+            tCtx.drawImage(srcCanvas, 0, 0, size, size);
+            
+            const data = tCtx.getImageData(0, 0, size, size).data;
+            // Find rough bounding box based on contrast/brightness
+            let minX=size, minY=size, maxX=0, maxY=0;
+            let sum = 0;
+            for(let i=0; i<data.length; i+=4) sum += (data[i]+data[i+1]+data[i+2])/3;
+            const thresh = sum / (size*size) + 20;
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    let idx = (y * size + x) * 4;
+                    let lum = (data[idx]+data[idx+1]+data[idx+2])/3;
+                    if (lum > thresh) {
+                        if (x < minX) minX = x; if (x > maxX) maxX = x;
+                        if (y < minY) minY = y; if (y > maxY) maxY = y;
+                    }
+                }
+            }
+            
+            // Add margin and constrain
+            const m = size * 0.1;
+            minX = Math.max(0, minX - m); minY = Math.max(0, minY - m);
+            maxX = Math.min(size, maxX + m); maxY = Math.min(size, maxY + m);
+            
+            // Return 4 fractional points [0-1]
+            if (maxX - minX > size*0.2) {
+                return {
+                    tl: { x: minX/size, y: minY/size },
+                    tr: { x: maxX/size, y: minY/size },
+                    br: { x: maxX/size, y: maxY/size },
+                    bl: { x: minX/size, y: maxY/size }
+                };
+            }
+            // Default 80% square
+            return { tl:{x:0.1, y:0.1}, tr:{x:0.9, y:0.1}, br:{x:0.9, y:0.9}, bl:{x:0.1, y:0.9} };
+        }
+
+        // --- CAPTURE ---
+        btns.capture.addEventListener('click', () => {
+            uncroppedCanvas.width = video.videoWidth; uncroppedCanvas.height = video.videoHeight;
+            uncroppedCanvas.getContext('2d').drawImage(video, 0, 0, uncroppedCanvas.width, uncroppedCanvas.height);
+            
+            cropCanvas.width = video.videoWidth; cropCanvas.height = video.videoHeight;
+            cropCtx.drawImage(uncroppedCanvas, 0, 0);
+
+            switchView('crop');
+            stopCamera();
+            
+            // Setup Polygon UI
+            setTimeout(initPolygon, 50);
+
+            if (pages.length === 0) {
+                const dateStr = new Date().toISOString().slice(0,10).replace(/-/g,"");
+                els.docName.value = `Scan_${dateStr}`;
+            }
+        });
+
+        btns.retake.addEventListener('click', () => { switchView('camera'); startCamera(); });
+
+        // --- POLYGON INTERACTION (SVG) ---
+        function initPolygon() {
+            const rect = cropCanvas.getBoundingClientRect();
+            const svg = document.getElementById('polygonOverlay');
+            // Make SVG exactly match the rendered canvas size
+            svg.style.width = rect.width + 'px';
+            svg.style.height = rect.height + 'px';
+            svg.style.left = cropCanvas.offsetLeft + 'px';
+            svg.style.top = cropCanvas.offsetTop + 'px';
+
+            const pts = fastQuadDetection(uncroppedCanvas);
+            polyPts.tl = { x: pts.tl.x * rect.width, y: pts.tl.y * rect.height };
+            polyPts.tr = { x: pts.tr.x * rect.width, y: pts.tr.y * rect.height };
+            polyPts.br = { x: pts.br.x * rect.width, y: pts.br.y * rect.height };
+            polyPts.bl = { x: pts.bl.x * rect.width, y: pts.bl.y * rect.height };
+            
+            updatePolySVG();
+        }
+
+        function updatePolySVG() {
+            handles.tl.setAttribute('cx', polyPts.tl.x); handles.tl.setAttribute('cy', polyPts.tl.y);
+            handles.tr.setAttribute('cx', polyPts.tr.x); handles.tr.setAttribute('cy', polyPts.tr.y);
+            handles.br.setAttribute('cx', polyPts.br.x); handles.br.setAttribute('cy', polyPts.br.y);
+            handles.bl.setAttribute('cx', polyPts.bl.x); handles.bl.setAttribute('cy', polyPts.bl.y);
+            svgPoly.setAttribute('points', `${polyPts.tl.x},${polyPts.tl.y} ${polyPts.tr.x},${polyPts.tr.y} ${polyPts.br.x},${polyPts.br.y} ${polyPts.bl.x},${polyPts.bl.y}`);
+        }
+
+        let activeHandle = null;
+        function getSvgEventProps(e) {
+            const rect = document.getElementById('polygonOverlay').getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return { x: clientX - rect.left, y: clientY - rect.top, w: rect.width, h: rect.height };
+        }
+
+        Object.keys(handles).forEach(key => {
+            handles[key].addEventListener('mousedown', (e) => { activeHandle = key; e.preventDefault(); });
+            handles[key].addEventListener('touchstart', (e) => { activeHandle = key; e.preventDefault(); }, {passive:false});
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if(!activeHandle) return;
+            const p = getSvgEventProps(e);
+            polyPts[activeHandle] = { x: Math.max(0, Math.min(p.w, p.x)), y: Math.max(0, Math.min(p.h, p.y)) };
+            updatePolySVG();
+        });
+        document.addEventListener('touchmove', (e) => {
+            if(!activeHandle) return;
+            const p = getSvgEventProps(e);
+            polyPts[activeHandle] = { x: Math.max(0, Math.min(p.w, p.x)), y: Math.max(0, Math.min(p.h, p.y)) };
+            updatePolySVG();
+            e.preventDefault();
+        }, {passive:false});
+        
+        document.addEventListener('mouseup', () => activeHandle = null);
+        document.addEventListener('touchend', () => activeHandle = null);
+
+        // --- MATH: FAST BILINEAR WARP (PERSPECTIVE CORRECTION) ---
+        function warpPerspective(srcCanvas, dstW, dstH, poly) {
+            const dstCanvas = document.createElement('canvas');
+            dstCanvas.width = dstW; dstCanvas.height = dstH;
+            const ctx = dstCanvas.getContext('2d', { willReadFrequently: true });
+            
+            const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+            const srcImg = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
+            const dstImg = ctx.createImageData(dstW, dstH);
+
+            const src32 = new Uint32Array(srcImg.data.buffer);
+            const dst32 = new Uint32Array(dstImg.data.buffer);
+
+            const sw = srcCanvas.width, sh = srcCanvas.height;
+            
+            for (let y = 0; y < dstH; y++) {
+                const v = y / dstH;
+                for (let x = 0; x < dstW; x++) {
+                    const u = x / dstW;
+
+                    // Bilinear interpolation math
+                    const sx = (1-u)*(1-v)*poly.tl.x + u*(1-v)*poly.tr.x + (1-u)*v*poly.bl.x + u*v*poly.br.x;
+                    const sy = (1-u)*(1-v)*poly.tl.y + u*(1-v)*poly.tr.y + (1-u)*v*poly.bl.y + u*v*poly.br.y;
+
+                    const srcX = Math.max(0, Math.min(sw - 1, sx | 0));
+                    const srcY = Math.max(0, Math.min(sh - 1, sy | 0));
+
+                    dst32[y * dstW + x] = src32[srcY * sw + srcX];
+                }
+            }
+            ctx.putImageData(dstImg, 0, 0);
+            return dstCanvas;
+        }
+
+        // --- CONFIRM CROP ---
+        btns.confirm.addEventListener('click', () => {
+            const rect = cropCanvas.getBoundingClientRect();
+            const scaleX = uncroppedCanvas.width / rect.width;
+            const scaleY = uncroppedCanvas.height / rect.height;
+
+            // Map UI points to Full Resolution Image pixels
+            const realPoly = {
+                tl: { x: polyPts.tl.x * scaleX, y: polyPts.tl.y * scaleY },
+                tr: { x: polyPts.tr.x * scaleX, y: polyPts.tr.y * scaleY },
+                br: { x: polyPts.br.x * scaleX, y: polyPts.br.y * scaleY },
+                bl: { x: polyPts.bl.x * scaleX, y: polyPts.bl.y * scaleY }
+            };
+
+            // Calculate destination rectangle size (A4 ratio ~ 1:1.414)
+            const topW = Math.hypot(realPoly.tr.x - realPoly.tl.x, realPoly.tr.y - realPoly.tl.y);
+            const botW = Math.hypot(realPoly.br.x - realPoly.bl.x, realPoly.br.y - realPoly.bl.y);
+            const dstW = Math.max(topW, botW);
+            const dstH = dstW * 1.414; // Standard document ratio
+
+            // Perform mathematically perfect 4-point perspective un-skewing
+            const warpedCanvas = warpPerspective(uncroppedCanvas, dstW, dstH, realPoly);
+            
+            const filteredCanvas = document.createElement('canvas');
+            pages.push({ rawCanvas: warpedCanvas, filteredCanvas, filter: 'magic' });
+            currentPageIndex = pages.length - 1;
+            
+            applyFilterToPage(currentPageIndex, 'magic');
+            
+            // CONTINUOUS SCANNING
+            switchView('camera');
+            startCamera(); 
+
+            // OCR Naming on first page
+            if (pages.length === 1 && els.docName.value.startsWith('Scan_') && tesseractWorker) {
+                runAIOcrNaming(warpedCanvas);
+            }
+        });
+
+        // --- AI OCR AUTO-NAMING ---
+        async function runAIOcrNaming(imgCanvas) {
+            els.aiNaming.classList.remove('hide');
+            try {
+                // Read only the top 30% to grab titles and run extremely fast
+                const smallC = document.createElement('canvas');
+                smallC.width = imgCanvas.width * 0.3; smallC.height = imgCanvas.height * 0.3;
+                smallC.getContext('2d').drawImage(imgCanvas, 0, 0, smallC.width, smallC.height);
+                
+                const { data: { text } } = await tesseractWorker.recognize(smallC);
+                
+                const lines = text.split('\n').map(l => l.trim().replace(/[^a-zA-Z0-9 ]/g, '')).filter(l => l.length > 4 && /[a-zA-Z]/.test(l));
+                if (lines.length > 0) {
+                    let bestLine = lines[0];
+                    if (lines.length > 1 && lines[1].length > bestLine.length + 5) bestLine = lines[1];
+
+                    let title = bestLine.split(' ').slice(0, 3).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('_');
+                    title = title.substring(0, 20);
+                    els.docName.value = `${title}`;
+                }
+            } catch (e) {}
+            finally { els.aiNaming.classList.add('hide'); }
+        }
+
+        // --- FILTERS (Apple-style High Quality) ---
+        function applyFilterToPage(pageIdx, filterType) {
+            const page = pages[pageIdx];
+            page.filter = filterType;
+            const w = page.rawCanvas.width, h = page.rawCanvas.height;
+            page.filteredCanvas.width = w; page.filteredCanvas.height = h;
+            const fCtx = page.filteredCanvas.getContext('2d', { willReadFrequently: true });
+            fCtx.drawImage(page.rawCanvas, 0, 0);
+            
+            if(filterType !== 'original') {
+                const imgData = fCtx.getImageData(0, 0, w, h);
+                const data = imgData.data;
+                for (let i = 0; i < data.length; i += 4) {
+                    let r = data[i], g = data[i + 1], b = data[i + 2];
+                    let v = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+                    if (filterType === 'bw') {
+                        v = (v >= 135) ? 255 : 0; // Pure B&W
+                    } else if (filterType === 'magic') {
+                        // Apple-style Magic Scan: Super clean white background, vibrant ink
+                        if (v > 150) {
+                            data[i] = Math.min(255, r + (255 - r) * 0.9);
+                            data[i+1] = Math.min(255, g + (255 - g) * 0.9);
+                            data[i+2] = Math.min(255, b + (255 - b) * 0.9);
+                        } else if (v < 100) {
+                            data[i] = Math.max(0, r * 0.6);
+                            data[i+1] = Math.max(0, g * 0.6);
+                            data[i+2] = Math.max(0, b * 0.6);
+                        } else {
+                            data[i] = Math.min(255, Math.max(0, (r - 128) * 1.5 + 128));
+                            data[i+1] = Math.min(255, Math.max(0, (g - 128) * 1.5 + 128));
+                            data[i+2] = Math.min(255, Math.max(0, (b - 128) * 1.5 + 128));
+                        }
+                        continue;
+                    } else if (filterType === 'gray') {
+                        v = ((v / 255 - 0.5) * 1.5 + 0.5) * 255; // Rich Grayscale
+                    }
+                    data[i] = data[i + 1] = data[i + 2] = v;
+                }
+                fCtx.putImageData(imgData, 0, 0);
+            }
+        }
+
+        function updateThumbnails() {
+            els.thumbnails.innerHTML = '';
+            pages.forEach((page, index) => {
+                const w = document.createElement('div');
+                w.className = `relative inline-block w-16 h-20 bg-white border-2 rounded-xl overflow-hidden shrink-0 cursor-pointer shadow-sm transition-transform ${index === currentPageIndex ? 'border-black scale-105' : 'border-transparent'}`;
+                w.onclick = () => { currentPageIndex = index; renderPreview(); };
+                
+                const img = document.createElement('img');
+                img.src = page.filteredCanvas.toDataURL('image/jpeg', 0.2); // Ultra tiny thumb
+                img.className = 'w-full h-full object-cover';
+                
+                const delBtn = document.createElement('button');
+                delBtn.innerHTML = '<i class="ph-bold ph-x"></i>';
+                delBtn.className = 'absolute top-0 right-0 bg-red-500/90 text-white p-1 rounded-bl-lg text-[10px] z-10 active:bg-red-600';
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    pages.splice(index, 1);
+                    if(pages.length === 0) { switchView('camera'); startCamera(); } 
+                    else { currentPageIndex = Math.max(0, index - 1); renderPreview(); }
+                };
+
+                const num = document.createElement('div');
+                num.innerText = index + 1;
+                num.className = 'absolute bottom-0 left-0 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded-tr-lg font-bold backdrop-blur';
+
+                w.appendChild(img); w.appendChild(delBtn); w.appendChild(num); els.thumbnails.appendChild(w);
+            });
+        }
+
+        function renderPreview() {
+            if (pages.length === 0) return;
+            const page = pages[currentPageIndex];
+            canvas.width = page.filteredCanvas.width; canvas.height = page.filteredCanvas.height;
+            ctx.drawImage(page.filteredCanvas, 0, 0);
+            
+            btns.filters.forEach(b => b.classList.remove('active-filter'));
+            document.querySelector(`[data-filter="${page.filter}"]`).classList.add('active-filter');
+            updateThumbnails();
+        }
+
+        btns.filters.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                applyFilterToPage(currentPageIndex, e.currentTarget.dataset.filter);
+                renderPreview();
+            });
+        });
+
+        // --- PDF GENERATION & UPLOAD ---
+        btns.savePdf.addEventListener('click', () => {
+            if(pages.length === 0) return;
+            const ogText = btns.savePdf.innerHTML;
+            btns.savePdf.innerHTML = '<i class="ph-bold ph-spinner animate-spin text-xl"></i> Optimizing PDF...';
+            
+            requestAnimationFrame(() => {
+                setTimeout(() => {
+                    try {
+                        const { jsPDF } = window.jspdf;
+                        const a4W = 595.28, a4H = 841.89;
+                        const pdf = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' });
+
+                        pages.forEach((page, index) => {
+                            if (index > 0) pdf.addPage();
+                            const imgData = page.filteredCanvas.toDataURL('image/jpeg', 0.85); // High compression, visually perfect
+                            const ratio = Math.min(a4W / page.filteredCanvas.width, a4H / page.filteredCanvas.height);
+                            const finalW = page.filteredCanvas.width * ratio, finalH = page.filteredCanvas.height * ratio;
+                            pdf.addImage(imgData, 'JPEG', (a4W - finalW)/2, (a4H - finalH)/2, finalW, finalH);
+                        });
+                        
+                        let customName = (els.docName.value.trim() || 'Scanned_Doc').replace(/\.pdf$/i, '');
+                        const filename = `${customName}.pdf`;
+                        
+                        pdf.save(filename);
+                        document.getElementById('formFileNameDisplay').innerText = filename;
+
+                        switchView('success');
+                    } catch (error) { alert("Failed to process PDF."); } 
+                    finally { btns.savePdf.innerHTML = ogText; }
+                }, 50);
+            });
+        });
+
+        // NATIVE DIRECT NAVIGATION TO GOOGLE FORM
+        btns.openForm.addEventListener('click', () => {
+            window.location.href = "https://docs.google.com/forms/d/e/1FAIpQLSehE6rIQ-ieMQVpqE5xcPJVHBzNdaM64FlysOverhhbzQe7UA/viewform";
+        });
+
+        btns.closeForm.addEventListener('click', () => {
+            switchView('camera'); startCamera();
+            pages = [];
+        });
+
+        // Initialize App
+        window.addEventListener('load', () => {
+            initAI(); 
+            startCamera();
+        });
+
+    </script>
+</body>
+</html>
